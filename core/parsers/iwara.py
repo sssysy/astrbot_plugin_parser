@@ -110,8 +110,6 @@ class api:
         if rating == "ecchi":
             if config == "send":
                 return video_thumbnail
-            elif config == "ignore":
-                return None
             else:
                 output_path = video_thumbnail.parent / f"{video_thumbnail.stem}_blur{video_thumbnail.suffix}"
                 return api._blur(video_thumbnail, output_path)
@@ -174,6 +172,10 @@ class IwaraParser(BaseParser):
             if user_avatar
             else "https://www.iwara.tv/images/default-avatar.jpg" # iwara 默认头像
         )
+
+        if r18 == "ecchi" and self.mycfg.nsfw == "ignore":
+            raise ParseException(f"视频 {video_title} 是 R18 视频，已忽略")
+
         img_path = await self.downloader.download_img(video_thumbnail, proxy=self.proxy)
         video_thumbnail_img = api.auto_blur_video_thumbnail(img_path, r18, self.mycfg.nsfw or "blur")
         
