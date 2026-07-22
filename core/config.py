@@ -158,6 +158,9 @@ class ParserItem(ConfigNode):
     video_codec_list: list | None
     video_quality: str | None
     nsfw: str | None
+    session: list | None
+    api_id: int | None
+    api_hash: str | None
 
     @property
     def name(self) -> str:
@@ -181,6 +184,7 @@ class ParserConfig(ConfigNodeContainer):
     youtube: ParserItem
     iwara: ParserItem
     shipinhao: ParserItem
+    telegram: ParserItem
 
     def __init__(self, nodes: list[dict[str, Any]]):
         super().__init__(nodes, item_cls=ParserItem)

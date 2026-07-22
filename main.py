@@ -12,13 +12,14 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
+from astrbot.core.star.filter.command import GreedyStr
 
 from .core.arbiter import ArbiterContext, EmojiLikeArbiter
 from .core.clean import CacheCleaner
 from .core.config import PluginConfig
 from .core.debounce import Debouncer
 from .core.download import Downloader
-from .core.parsers import BaseParser, BilibiliParser
+from .core.parsers import BaseParser, BilibiliParser, TelegramParser
 from .core.render import Renderer
 from .core.sender import MessageSender
 from .core.utils import extract_json_url
@@ -219,4 +220,34 @@ class ParserPlugin(Star):
         qrcode = await parser.login.login_with_qrcode()
         yield event.chain_result([Image.fromBytes(qrcode)])
         async for msg in parser.login.check_qr_state():
+            yield event.plain_result(msg)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("登录Telegram", alias={"tglogin", "登录tg"})
+    async def login_telegram(self, event: AstrMessageEvent, args: GreedyStr,):
+        """登录 Telegram(扫码) 或完成 2FA: tglogin 2fa <密码>"""
+        parser: TelegramParser = self._get_parser_by_type(TelegramParser)  # type: ignore
+        if parser.login is None:
+            yield event.plain_result("Telegram 解析器未就绪,可能依赖安装失败,请检查日志")
+            return
+        args_str = str(args).strip()
+
+        # 2FA 提交
+        if args_str == "2fa" or args_str.startswith("2fa "):
+            password = args_str[3:].strip()  # 去掉 2fa 前缀
+            if not password:
+                yield event.plain_result("请提供 2FA 密码,用法: tglogin 2fa <密码>")
+                return
+            result = await parser.login.complete_2fa(password)
+            yield event.plain_result(result)
+            return
+
+        # 触发扫码逻辑
+        try:
+            qr_png = await parser.login.start_qr_login()
+        except Exception as e:
+            yield event.plain_result(f"生成二维码失败: {e}")
+            return
+        yield event.chain_result([Image.fromBytes(qr_png)])
+        async for msg in parser.login.wait_qr_login():
             yield event.plain_result(msg)
