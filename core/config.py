@@ -158,7 +158,6 @@ class ParserItem(ConfigNode):
     video_codec_list: list | None
     video_quality: str | None
     nsfw: str | None
-    session: list | None
     api_id: int | None
     api_hash: str | None
 

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import filecmp
 import io
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -139,12 +137,15 @@ class TelegramLogin:
             return False
 
     async def start_qr_login(self) -> bytes:
-        """生成二维码 PNG 字节。若已登录直接抛异常提示。"""
-        from ..exception import ParseException
-
+        """生成二维码 PNG 字节。若已登录则登出旧 session 后重新登录(覆盖)。"""
         await self._ensure_connected()
         if await self.is_logged_in():
-            raise ParseException("已登录,无需重复登录")
+            logger.info("[parserplugin-telegram] 已登录,正在登出旧 session 以覆盖")
+            try:
+                await self.client.log_out()
+            except Exception as e:
+                logger.warning(f"[parserplugin-telegram] 登出旧 session 失败,继续尝试登录: {e}")
+            await self._ensure_connected()
         self._qr = await self.client.qr_login()
         self._awaiting_2fa = False
         return _make_qr_png(self._qr.url)
@@ -226,51 +227,8 @@ class TelegramParser(BaseParser):
 
     # ---------- client 生命周期 ----------
     def _resolve_session(self) -> str:
-        """返回 session 文件路径,上传的会先同步到 cookie_dir"""
-        target = self.cfg.cookie_dir / "telegram_session"
-        s = self.mycfg.session
-        if isinstance(s, list) and s:
-            self._sync_uploaded_session(s[0], target)
-        return str(target)
-
-    def _sync_uploaded_session(self, rel_path: str, target: Path) -> None:
-        """将用户上传的 session 文件同步到 cookie_dir"""
-        uploaded = Path(rel_path)
-        if uploaded.is_absolute():
-            logger.warning(
-                f"[parserplugin-telegram] session 文件路径必须是相对路径: {rel_path}"
-            )
-            return
-        data_root = self.cfg.data_dir.resolve()
-        src = (data_root / uploaded).resolve()
-        try:
-            src.relative_to(data_root)
-        except ValueError:
-            logger.warning(
-                f"[parserplugin-telegram] session 文件路径越界, 已忽略: {rel_path}"
-            )
-            return
-        if not src.is_file():
-            logger.warning(
-                f"[parserplugin-telegram] session 文件不存在, 已忽略: {src}"
-            )
-            return
-        dst = target.with_suffix(".session")
-        try:
-            if dst.is_file():
-                try:
-                    if filecmp.cmp(src, dst, shallow=False):
-                        return
-                except Exception:
-                    pass
-            shutil.copy2(src, dst)
-            logger.info(
-                f"[parserplugin-telegram] 已同步上传的 session 文件到 {dst}"
-            )
-        except Exception as e:
-            logger.error(
-                f"[parserplugin-telegram] 同步 session 文件失败(可能被占用): {e}"
-            )
+        """返回默认 session 文件路径 (cookie_dir/telegram_session)"""
+        return str(self.cfg.cookie_dir / "telegram_session")
 
     def _get_client(self) -> "TelegramClient":
         """懒初始化 TelegramClient"""

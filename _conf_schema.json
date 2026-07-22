@@ -575,15 +575,6 @@
                         "type": "bool",
                         "default": false
                     },
-                    "session": {
-                        "description": "telegram 登录 session",
-                        "hint": ".session 文件。不知道是什么就用 tglogin 指令登录，会自动生成。",
-                        "type": "file",
-                        "default": [],
-                        "file_types": [
-                            "session"
-                        ]
-                    },
                     "api_id": {
                         "description": "api_id",
                         "hint": "可在 my.telegram.org 申请",
