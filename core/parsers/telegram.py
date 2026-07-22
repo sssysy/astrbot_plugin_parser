@@ -137,7 +137,7 @@ class TelegramLogin:
             return False
 
     async def start_qr_login(self) -> bytes:
-        """生成二维码 PNG 字节。若已登录则登出旧 session 后重新登录(覆盖)。"""
+        """生成二维码 PNG 字节。若已登录则登出旧 session 后重建 client 重新登录(覆盖)。"""
         await self._ensure_connected()
         if await self.is_logged_in():
             logger.info("[parserplugin-telegram] 已登录,正在登出旧 session 以覆盖")
@@ -145,6 +145,8 @@ class TelegramLogin:
                 await self.client.log_out()
             except Exception as e:
                 logger.warning(f"[parserplugin-telegram] 登出旧 session 失败,继续尝试登录: {e}")
+            # log_out 后 client 不可复用,必须重建
+            await self.parser.reset_client()
             await self._ensure_connected()
         self._qr = await self.client.qr_login()
         self._awaiting_2fa = False
