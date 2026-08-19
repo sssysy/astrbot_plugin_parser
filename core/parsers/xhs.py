@@ -20,6 +20,9 @@ class XHSParser(BaseParser):
         super().__init__(config, downloader)
         self.mycfg = config.parser.xhs
         self.cookies = self.mycfg.cookies
+        self.parse_original_image: bool = bool(
+            getattr(self.mycfg, "parse_original_image", False)
+        )
         self.headers.update(
             {
                 "accept": (
@@ -82,6 +85,8 @@ class XHSParser(BaseParser):
         if not note_data:
             raise ParseException("can't find note detail in json_obj")
 
+        parse_original_image = self.parse_original_image
+
         class Image(Struct):
             fileId: str | None = None
             urlDefault: str | None = None
@@ -89,7 +94,7 @@ class XHSParser(BaseParser):
 
             @property
             def best_url(self) -> str:
-                if self.fileId:
+                if parse_original_image and self.fileId:
                     return f"https://ci.xiaohongshu.com/{self.fileId}"
                 return self.urlDefault or self.url or ""
 
@@ -163,6 +168,8 @@ class XHSParser(BaseParser):
         if not note_data:
             raise ParseException("can't find noteData in noteData.data")
 
+        parse_original_image = self.parse_original_image
+
         class Image(Struct):
             fileId: str | None = None
             url: str | None = None
@@ -170,9 +177,9 @@ class XHSParser(BaseParser):
 
             @property
             def best_url(self) -> str:
-                if self.fileId:
+                if parse_original_image and self.fileId:
                     return f"https://ci.xiaohongshu.com/{self.fileId}"
-                return self.urlSizeLarge or self.url or ""
+                return self.url or self.urlSizeLarge or ""
 
         class User(Struct):
             nickName: str

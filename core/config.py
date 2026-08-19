@@ -166,6 +166,7 @@ class ParserItem(ConfigNode):
     snowluma_http_url: str | None
     snowluma_access_token: str | None
     snowluma_credential_cache_seconds: int | None
+    parse_original_image: bool | None
 
     @property
     def name(self) -> str:
