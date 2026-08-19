@@ -83,7 +83,15 @@ class XHSParser(BaseParser):
             raise ParseException("can't find note detail in json_obj")
 
         class Image(Struct):
-            urlDefault: str
+            fileId: str | None = None
+            urlDefault: str | None = None
+            url: str | None = None
+
+            @property
+            def best_url(self) -> str:
+                if self.fileId:
+                    return f"https://ci.xiaohongshu.com/{self.fileId}"
+                return self.urlDefault or self.url or ""
 
         class User(Struct):
             nickname: str
@@ -107,7 +115,7 @@ class XHSParser(BaseParser):
 
             @property
             def image_urls(self) -> list[str]:
-                return [item.urlDefault for item in self.imageList]
+                return [item.best_url for item in self.imageList if item.best_url]
 
             @property
             def video_url(self) -> str | None:
@@ -156,8 +164,15 @@ class XHSParser(BaseParser):
             raise ParseException("can't find noteData in noteData.data")
 
         class Image(Struct):
-            url: str
+            fileId: str | None = None
+            url: str | None = None
             urlSizeLarge: str | None = None
+
+            @property
+            def best_url(self) -> str:
+                if self.fileId:
+                    return f"https://ci.xiaohongshu.com/{self.fileId}"
+                return self.urlSizeLarge or self.url or ""
 
         class User(Struct):
             nickName: str
@@ -170,12 +185,12 @@ class XHSParser(BaseParser):
             user: User
             time: int
             lastUpdateTime: int
-            imageList: list[Image] = []  # 有水印
+            imageList: list[Image] = field(default_factory=list)
             video: Video | None = None
 
             @property
             def image_urls(self) -> list[str]:
-                return [item.url for item in self.imageList]
+                return [item.best_url for item in self.imageList if item.best_url]
 
             @property
             def video_url(self) -> str | None:
@@ -186,11 +201,11 @@ class XHSParser(BaseParser):
         class NormalNotePreloadData(Struct):
             title: str
             desc: str
-            imagesList: list[Image] = []  # 无水印, 但只有一只，用于视频封面
+            imagesList: list[Image] = field(default_factory=list)
 
             @property
             def image_urls(self) -> list[str]:
-                return [item.urlSizeLarge or item.url for item in self.imagesList]
+                return [item.best_url for item in self.imagesList if item.best_url]
 
         note_data = convert(note_data, type=NoteData)
 
