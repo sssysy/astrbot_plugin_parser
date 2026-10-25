@@ -245,8 +245,6 @@ class PluginConfig(ConfigNode):
     parsers_template: list[dict[str, Any]]
 
     _plugin_name = "astrbot_plugin_parser"
-    _new_template_keys = {"jmcomic"}
-
     def __init__(self, config: AstrBotConfig, context: Context):
         super().__init__(config)
         self.context = context
@@ -282,7 +280,6 @@ class PluginConfig(ConfigNode):
             )
             self.save_config()
 
-        self._sync_parser_templates()
         self.parser = ParserConfig(self.parsers_template)
 
     @staticmethod
@@ -295,97 +292,6 @@ class PluginConfig(ConfigNode):
         except Exception as e:
             logger.error(f"[parser] 加载模板失败: {e}")
             return []
-
-    @property
-    def _template_state_file(self) -> Path:
-        """记录已经向用户提供过的解析器，避免重新加入用户手动删除的项。"""
-        return self.data_dir / "parsers_state.json"
-
-    def _sync_parser_templates(self) -> None:
-        """升级时只追加从未提供过的新解析器，保留现有配置。"""
-        templates = self.parsers_template
-        if not isinstance(templates, list):
-            templates = []
-            self.parsers_template = templates
-
-        defaults = self.load_parser_template(self.default_template_file)
-        default_keys = [
-            str(node["__template_key"])
-            for node in defaults
-            if isinstance(node, dict) and node.get("__template_key")
-        ]
-        existing = {
-            str(node["__template_key"])
-            for node in templates
-            if isinstance(node, dict) and node.get("__template_key")
-        }
-
-        known = self._load_template_state()
-        if known is None:
-            # 从没有状态文件的旧版本升级时，只补充本版本明确新增的解析器，
-            # 避免把用户此前主动删除的旧解析器重新加回。
-            added = [
-                key
-                for key in self._new_template_keys
-                if key in default_keys and key not in existing
-            ]
-            if added:
-                for node in defaults:
-                    if node.get("__template_key") in added:
-                        templates.append(node)
-                self._persist_config()
-                logger.info(
-                    f"[parser] 已补充新增解析器配置: {'、'.join(sorted(added))}"
-                )
-            self._save_template_state(existing | set(default_keys) | set(added))
-            return
-
-        added = [
-            key for key in default_keys if key not in known and key not in existing
-        ]
-        if not added:
-            return
-
-        for node in defaults:
-            if node.get("__template_key") in added:
-                templates.append(node)
-        self._save_template_state(known | set(default_keys) | existing)
-        self._persist_config()
-        logger.info(f"[parser] 已补充新增解析器配置: {'、'.join(added)}")
-
-    def _load_template_state(self) -> set[str] | None:
-        """读取已提供过的解析器键；状态文件不存在时返回 None。"""
-        try:
-            with self._template_state_file.open(encoding="utf-8") as f:
-                data = json.load(f)
-        except FileNotFoundError:
-            return None
-        except Exception as exc:
-            logger.warning(f"[parser] 读取解析器状态失败，按首次运行处理: {exc}")
-            return None
-
-        keys = data.get("known_keys") if isinstance(data, dict) else None
-        return {str(key) for key in keys} if isinstance(keys, list) else None
-
-    def _save_template_state(self, known: set[str]) -> None:
-        """持久化已提供过的解析器键。"""
-        try:
-            with self._template_state_file.open("w", encoding="utf-8") as f:
-                json.dump(
-                    {"known_keys": sorted(known)},
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-        except Exception as exc:
-            logger.warning(f"[parser] 保存解析器状态失败: {exc}")
-
-    def _persist_config(self) -> None:
-        """配置保存失败不应阻止插件加载。"""
-        try:
-            self.save_config()
-        except Exception as exc:
-            logger.warning(f"[parser] 保存解析器模板失败: {exc}")
 
     def add_blacklist(self, umo: str):
         if umo not in self.blacklist:
