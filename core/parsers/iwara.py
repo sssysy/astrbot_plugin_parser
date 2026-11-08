@@ -218,7 +218,7 @@ class IwaraParser(BaseParser):
         send_info = f"视频描述: {video_body}\n\nTAG: {', '.join(f'#{tag}' for tag in video_tags)}"
 
         video_contents = VideoContent(
-            path_task=self.downloader.download_video(video_url),
+            path_task=self.downloader.download_video(video_url, proxy=self.proxy),
             cover=video_thumbnail_img if video_thumbnail_img else None,
             duration=video_duration,
         )
