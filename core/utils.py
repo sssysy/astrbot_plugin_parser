@@ -44,12 +44,37 @@ async def exec_ffmpeg_cmd(cmd: list[str]) -> None:
     Args:
         cmd (list[str]): 命令序列
     """
-    try:
-        process = await asyncio.create_subprocess_exec(
+    process = None
+    spawn = asyncio.create_task(
+        asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
+    )
+    try:
+        process = await asyncio.shield(spawn)
         _, stderr = await process.communicate()
         return_code = process.returncode
+    except asyncio.CancelledError:
+        # Cancellation may arrive while the OS is still starting the process.
+        if process is None:
+            try:
+                process = await asyncio.shield(spawn)
+            except Exception:
+                raise asyncio.CancelledError from None
+        if process.returncode is None:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+        try:
+            await asyncio.wait_for(process.communicate(), timeout=5)
+        except TimeoutError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.communicate()
+        raise
     except FileNotFoundError:
         raise RuntimeError("ffmpeg 未安装或无法找到可执行文件")
 

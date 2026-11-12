@@ -1,4 +1,4 @@
-from asyncio import Task, TimeoutError, create_task, gather, sleep, to_thread
+from asyncio import CancelledError, Task, TimeoutError, create_task, gather, sleep, to_thread
 from collections.abc import Callable, Coroutine
 from functools import wraps
 from pathlib import Path
@@ -88,6 +88,7 @@ class Downloader:
         file_name: str | None = None,
         headers: dict[str, str] | None = None,
         proxy: str | None | object = ...,
+        retry_times: int | None = None,
     ) -> Path:
         """流式下载"""
         if not file_name:
@@ -97,7 +98,7 @@ class Downloader:
         if file_path.exists():
             return file_path
         headers = headers or self.default_headers
-        retries = self.cfg.download_retry_times
+        retries = self.cfg.download_retry_times if retry_times is None else max(0, int(retry_times))
         for attempt in range(retries + 1):
             try:
                 async with self.client.get(
@@ -109,11 +110,11 @@ class Downloader:
                     max_bytes = self.max_size * 1024 * 1024
 
                     if content_length == 0:
-                        logger.warning(f"媒体 url: {url}, 大小为 0, 取消下载")
+                        logger.warning("媒体大小为 0, 取消下载")
                         raise ZeroSizeException
                     if content_length and content_length > max_bytes:
                         logger.warning(
-                            f"媒体 url: {url} 大小 {content_length / 1024 / 1024:.2f} MB 超过 {self.max_size} MB, 取消下载"
+                            f"媒体大小 {content_length / 1024 / 1024:.2f} MB 超过 {self.max_size} MB, 取消下载"
                         )
                         raise SizeLimitException
 
@@ -130,7 +131,7 @@ class Downloader:
                                 bar.update(len(chunk))
 
                     if downloaded == 0:
-                        logger.warning(f"媒体 url: {url}, 实际大小为 0, 取消下载")
+                        logger.warning("媒体实际大小为 0, 取消下载")
                         raise ZeroSizeException
                     if content_length and downloaded < content_length:
                         raise ClientError(
@@ -141,12 +142,15 @@ class Downloader:
             except (ZeroSizeException, SizeLimitException):
                 await safe_unlink(file_path)
                 raise
+            except CancelledError:
+                await safe_unlink(file_path)
+                raise
             except (ClientError, TimeoutError) as exc:
                 await safe_unlink(file_path)
                 if attempt < retries:
                     await sleep(1 + attempt)
                     continue
-                logger.exception(f"下载失败 | url: {url}, file_path: {file_path}")
+                logger.warning(f"媒体下载失败 ({type(exc).__name__})")
                 raise DownloadException("媒体下载失败") from exc
         raise DownloadException("媒体下载失败")
 

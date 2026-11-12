@@ -1,7 +1,6 @@
 import asyncio
 from re import Match
 from typing import ClassVar
-from urllib.parse import urlparse
 
 from bilibili_api import request_settings, select_client
 from bilibili_api.opus import Opus
@@ -19,6 +18,7 @@ from ..base import (
     ParseException,
     handle,
 )
+from .candidates import download_av_candidates, download_candidates, stream_candidates
 from .login import BilibiliLogin
 
 try:
@@ -28,36 +28,6 @@ except Exception as e:
     raise ModuleNotFoundError(
         f"curl_cffi is required by bilibili parser but not installed: {e}"
     ) from e
-
-
-BLOCKED_PCDN_DOMAINS = (
-    "mcdn.bilivideo.com",
-    "mcdn.bilivideo.cn",
-    "szbdyd.com",
-    "mountaintoys.cn",
-    "nexusedgeio.com",
-    "ahdohpiechei.com",
-)
-
-
-def _is_pcdn_url(url: str) -> bool:
-    if not url:
-        return False
-    try:
-        host = (urlparse(url).hostname or "").lower()
-        return any(host == d or host.endswith("." + d) for d in BLOCKED_PCDN_DOMAINS)
-    except Exception:
-        return False
-
-
-def _select_stream_url(stream, filter_pcdn: bool) -> str:
-    original_url = stream.url
-    if not filter_pcdn:
-        return original_url
-    backup_urls = getattr(stream, "backup_url", []) or []
-    all_urls = [original_url] + backup_urls
-    clean_urls = [u for u in all_urls if not _is_pcdn_url(u)]
-    return clean_urls[0] if clean_urls else original_url
 
 
 class BilibiliParser(BaseParser):
@@ -106,14 +76,26 @@ class BilibiliParser(BaseParser):
     async def _parse_bv_bm(self, searched: Match[str]):
         bvid = searched.group("bvid")
         page = int(searched.group("page_num") or 1)
-        _, a_url = await self.extract_download_urls(bvid=bvid, page_index=page - 1)
-        if not a_url:
+        _, a_urls = await self.extract_download_candidates(
+            bvid=bvid, page_index=page - 1
+        )
+        if not a_urls:
             raise ParseException("未找到音频链接")
-        audio = self.create_audio_content(a_url)
+        audio = self.create_audio_content(
+            asyncio.create_task(
+                download_candidates(
+                    self.downloader,
+                    a_urls,
+                    headers=self.headers,
+                    proxy=self.proxy,
+                    default_suffix=".mp3",
+                )
+            )
+        )
         return self.result(
             title=f"BiliBili_audio_{bvid}",
             contents=[audio],
-            url=a_url,
+            url=a_urls[0],
         )
 
     @handle("av", r"^av(?P<avid>\d{6,})(?:\s)?(?P<page_num>\d{1,3})?$")
@@ -205,22 +187,24 @@ class BilibiliParser(BaseParser):
             output_path = self.cfg.cache_dir / f"{video_info.bvid}-{page_num}.mp4"
             if output_path.exists():
                 return output_path
-            v_url, a_url = await self.extract_download_urls(
+            v_urls, a_urls = await self.extract_download_candidates(
                 video=video, page_index=page_info.index
             )
             if page_info.duration > self.cfg.max_duration:
                 raise DurationLimitException
-            if a_url is not None:
-                return await self.downloader.download_av_and_merge(
-                    v_url,
-                    a_url,
+            if a_urls is not None:
+                return await download_av_candidates(
+                    self.downloader,
+                    v_urls,
+                    a_urls,
                     output_path=output_path,
                     headers=self.headers,
                     proxy=self.proxy,
                 )
             else:
-                return await self.downloader.streamd(
-                    v_url,
+                return await download_candidates(
+                    self.downloader,
+                    v_urls,
                     file_name=output_path.name,
                     headers=self.headers,
                     proxy=self.proxy,
@@ -435,6 +419,20 @@ class BilibiliParser(BaseParser):
         avid: int | None = None,
         page_index: int = 0,
     ) -> tuple[str, str | None]:
+        """Return primary URLs for callers which need one URL per stream."""
+        video_urls, audio_urls = await self.extract_download_candidates(
+            video, bvid=bvid, avid=avid, page_index=page_index
+        )
+        return video_urls[0], audio_urls[0] if audio_urls else None
+
+    async def extract_download_candidates(
+        self,
+        video: Video | None = None,
+        *,
+        bvid: str | None = None,
+        avid: int | None = None,
+        page_index: int = 0,
+    ) -> tuple[tuple[str, ...], tuple[str, ...] | None]:
         """解析视频下载链接
 
         Args:
@@ -467,23 +465,24 @@ class BilibiliParser(BaseParser):
             no_dolby_video=True,
             no_hdr=True,
         )
-        dash_data = download_url_data.get("dash") or {}
         if not streams:
             raise DownloadException("未找到可下载的视频流（可能是所选编码无对应流）")
         video_stream = streams[0]
         filter_pcdn = bool(getattr(self.mycfg, "block_pcdn", False))
-        if isinstance(video_stream, MP4StreamDownloadURL):
-            return _select_stream_url(video_stream, filter_pcdn), None
-        if not isinstance(video_stream, VideoStreamDownloadURL):
+        if not isinstance(video_stream, (MP4StreamDownloadURL, VideoStreamDownloadURL)):
             raise DownloadException("未找到可下载的视频流")
+        video_urls = stream_candidates(video_stream, download_url_data, filter_pcdn)
+        if not video_urls:
+            raise DownloadException("未找到可下载的视频链接")
+        if isinstance(video_stream, MP4StreamDownloadURL):
+            return video_urls, None
         logger.debug(
             f"视频流质量: {video_stream.video_quality.name}, 编码: {video_stream.video_codecs}"
         )
 
         audio_stream = streams[1] if len(streams) > 1 else None
         if not isinstance(audio_stream, AudioStreamDownloadURL):
-            return _select_stream_url(video_stream, filter_pcdn), None
+            return video_urls, None
         logger.debug(f"音频流质量: {audio_stream.audio_quality.name}")
-        return _select_stream_url(video_stream, filter_pcdn), _select_stream_url(
-            audio_stream, filter_pcdn
-        )
+        audio_urls = stream_candidates(audio_stream, download_url_data, filter_pcdn)
+        return video_urls, audio_urls or None
