@@ -1,13 +1,12 @@
 from re import Match
 from typing import ClassVar
-
-from aiohttp import ClientError
+from urllib.parse import urlsplit
 
 from ..config import PluginConfig
 from ..cookie import CookieJar
 from ..data import Platform
 from ..download import Downloader
-from .base import BaseParser, handle
+from .base import BaseParser, ParseException, handle
 
 
 class NCMParser(BaseParser):
@@ -41,16 +40,21 @@ class NCMParser(BaseParser):
         # 1. 取歌曲元数据
         async with self.session.get(detail_url, headers=self.headers) as resp:
             if resp.status >= 400:
-                raise ClientError(f"[NCM] 获取歌曲信息失败 HTTP {resp.status}")
+                raise ParseException(f"[NCM] 获取歌曲信息失败 HTTP {resp.status}")
             detail_json = await resp.json()
-            print(f"歌曲信息: {detail_json}")
 
-        song = detail_json.get("songs", [{}])[0]
-        if not song:
-            raise ValueError("[NCM] 未找到该歌曲")
+        songs = detail_json.get("songs") if isinstance(detail_json, dict) else None
+        if (
+            not isinstance(songs, list)
+            or not songs
+            or not isinstance(songs[0], dict)
+            or not songs[0]
+        ):
+            raise ParseException("[NCM] 未找到该歌曲，可能已下架或无权访问")
+        song = songs[0]
 
         title = song.get("name", "")
-        sub_title = song.get("alias", [""])[0]  # 别名
+        sub_title = (song.get("alias") or [""])[0]  # 没有别名时 API 返回空列表
         album_name = song.get("album", {}).get("name", "")
         cover_url = song.get("album", {}).get("picUrl", "") + "?param=640y640"
         duration_ms = song.get("duration", 0)
@@ -63,10 +67,28 @@ class NCMParser(BaseParser):
         # 2. 取播放地址
         async with self.session.get(play_url, headers=self.headers) as resp:
             if resp.status >= 400:
-                raise ClientError(f"[NCM] 获取播放地址失败 HTTP {resp.status}")
+                raise ParseException(f"[NCM] 获取播放地址失败 HTTP {resp.status}")
             play_json = await resp.json()
-        play_info = play_json.get("data", [{}])[0]
-        audio_url = play_info.get("url", "")
+        play_data = play_json.get("data") if isinstance(play_json, dict) else None
+        if (
+            not isinstance(play_data, list)
+            or not play_data
+            or not isinstance(play_data[0], dict)
+        ):
+            raise ParseException("[NCM] 未获取到播放地址，歌曲可能已下架或需要登录/会员权限")
+        audio_url = play_data[0].get("url")
+        try:
+            parsed_url = urlsplit(audio_url) if isinstance(audio_url, str) else None
+            valid_url = bool(
+                parsed_url and parsed_url.scheme in ("http", "https")
+                and parsed_url.hostname and parsed_url.port != 0
+                and parsed_url.username is None and parsed_url.password is None
+                and not any(char.isspace() or ord(char) < 32 for char in audio_url)
+            )
+        except ValueError:
+            valid_url = False
+        if not valid_url:
+            raise ParseException("[NCM] 未获取到播放地址，歌曲可能已下架或需要登录/会员权限")
 
         # 3. 组装结果
         author = self.create_author(author_name, author_avatar)
