@@ -1,6 +1,7 @@
 import asyncio
 import html as html_module
 import re
+import tempfile
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -315,14 +316,48 @@ class PixivParser(BaseParser):
 
 
     async def _build_pdf(
-        self, img_paths_task: asyncio.Task[list[Path]], pid: str
+        self, img_paths_task: asyncio.Task[list[Path]], pid: str, expected_count: int
     ) -> Path:
         paths = await img_paths_task
-        if not paths:
-            raise ParseException("漫画图片下载失败")
+        if not paths or len(paths) != expected_count:
+            raise ParseException("Pixiv 图片未全部下载成功，已取消生成 PDF，请稍后重试")
         pdf_path = self.cfg.cache_dir / f"pixiv_{pid}.pdf"
-        await asyncio.to_thread(PixivHelper.imgs_to_pdf, paths, pdf_path)
+        def build():
+            # A cancelled download can leave a cache path without a full image.
+            for path in paths:
+                try:
+                    with Image.open(path) as image:
+                        image.load()
+                except (OSError, ValueError):
+                    path.unlink(missing_ok=True)
+                    raise ParseException("Pixiv 图片缓存不完整，请稍后重试") from None
+            # Concurrent requests must never truncate the published PDF.
+            with tempfile.TemporaryDirectory(prefix=f".pixiv_{pid}-", dir=pdf_path.parent) as directory:
+                temporary = Path(directory) / "result.pdf"
+                PixivHelper.imgs_to_pdf(paths, temporary)
+                temporary.replace(pdf_path)
+
+        task = asyncio.create_task(asyncio.to_thread(build))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Let the worker publish a complete cache or clean its temporary file.
+            await asyncio.gather(task, return_exceptions=True)
+            raise
         return pdf_path
+
+    @staticmethod
+    def _page_image_urls(pages: list[dict[str, Any]], expected_count: int) -> list[str]:
+        if not isinstance(pages, list) or expected_count < 1 or len(pages) != expected_count:
+            raise ParseException("Pixiv 分页数据不完整，请稍后重试")
+        urls = []
+        for page in pages:
+            image_urls = page.get("urls") if isinstance(page, dict) else None
+            url = image_urls.get("original") if isinstance(image_urls, dict) else None
+            if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+                raise ParseException("Pixiv 分页缺少原图地址，请稍后重试")
+            urls.append(url)
+        return urls
 
     async def _build_gif(self, pid: str, meta_body: dict[str, Any]) -> Path:
         zip_url = meta_body.get("originalSrc") or meta_body.get("src", "")
@@ -570,17 +605,14 @@ class PixivParser(BaseParser):
             else:
                 # 静态插画 → 下载 → PDF
                 pages = await self.api.get_pages(pid)
-                img_urls = [p.get("urls", {}).get("original", "") for p in pages]
-                img_urls = [u for u in img_urls if u]
-                if not img_urls:
-                    raise ParseException("未找到插画图片")
+                img_urls = self._page_image_urls(pages, page_count)
                 img_paths_task = asyncio.create_task(
                     self.downloader.download_imgs_without_raise(
                         img_urls, headers=PIXIV_IMG_HEADERS, proxy=self.proxy
                     )
                 )
                 pdf_task = asyncio.create_task(
-                    self._build_pdf(img_paths_task, pid)
+                    self._build_pdf(img_paths_task, pid, len(img_urls))
                 )
             send_groups.append(
                 SendGroup(
@@ -599,10 +631,7 @@ class PixivParser(BaseParser):
             else:
                 # 静态插画
                 pages = await self.api.get_pages(pid)
-                img_urls = [p.get("urls", {}).get("original", "") for p in pages]
-                img_urls = [u for u in img_urls if u]
-                if not img_urls:
-                    raise ParseException("未找到插画图片")
+                img_urls = self._page_image_urls(pages, page_count)
                 content_contents.extend(
                     self.create_image_contents(
                         img_urls, headers=PIXIV_IMG_HEADERS
@@ -684,17 +713,14 @@ class PixivParser(BaseParser):
 
         # 下载漫画页并构建 PDF
         pages = await self.api.get_pages(pid)
-        img_urls = [p.get("urls", {}).get("original", "") for p in pages]
-        img_urls = [u for u in img_urls if u]
-        if not img_urls:
-            raise ParseException("未找到漫画图片")
+        img_urls = self._page_image_urls(pages, page_count)
 
         img_paths_task = asyncio.create_task(
             self.downloader.download_imgs_without_raise(
                 img_urls, headers=PIXIV_IMG_HEADERS, proxy=self.proxy
             )
         )
-        pdf_task = asyncio.create_task(self._build_pdf(img_paths_task, pid))
+        pdf_task = asyncio.create_task(self._build_pdf(img_paths_task, pid, len(img_urls)))
 
         send_groups: list[SendGroup] = [
             SendGroup(contents=[], render_card=True, force_merge=False),
