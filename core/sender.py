@@ -1,5 +1,7 @@
+from dataclasses import dataclass
 from itertools import chain
 from pathlib import Path
+from typing import Literal
 
 from astrbot.api import logger
 from astrbot.core.message.components import (
@@ -35,6 +37,42 @@ from .exception import (
 )
 from .render import Renderer
 from .utils import transcode_video_audio_to_lc
+
+
+@dataclass(slots=True)
+class DeliveryReport:
+    """Count acknowledged sends separately from unavailable media or preparation.
+
+    A truthy report means at least one message was accepted by ``event.send``;
+    callers must inspect ``status`` before claiming that every item was sent.
+    """
+
+    sent_count: int = 0
+    failed_count: int = 0
+    preview_sent_count: int = 0
+    download_failed_count: int = 0
+    skipped_count: int = 0
+    preparation_failed_count: int = 0
+
+    @property
+    def status(self) -> Literal["sent", "partial", "empty", "failed"]:
+        incomplete = any((self.failed_count, self.download_failed_count,
+                          self.skipped_count, self.preparation_failed_count))
+        if self.sent_count:
+            return "partial" if incomplete else "sent"
+        return "failed" if incomplete else "empty"
+
+    def __bool__(self) -> bool:
+        return self.sent_count > 0
+
+    def include(self, other: "DeliveryReport") -> None:
+        for name in self.__dataclass_fields__:
+            setattr(self, name, getattr(self, name) + getattr(other, name))
+
+    def to_dict(self) -> dict[str, int | str]:
+        return {"status": self.status, **{
+            name: getattr(self, name) for name in self.__dataclass_fields__
+        }}
 
 
 class MessageSender:
@@ -136,7 +174,7 @@ class MessageSender:
         event: AstrMessageEvent,
         result: ParseResult,
         plan: dict,
-    ):
+    ) -> DeliveryReport:
         """
         发送预览卡片（独立消息）
 
@@ -145,16 +183,35 @@ class MessageSender:
         - 未触发合并转发
         - 卡片作为“预览”，不与正文混合
         """
+        report = DeliveryReport()
         if not plan["preview_card"]:
-            return
+            return report
 
-        if image_path := await self.renderer.render_card(result):
-            await event.send(event.chain_result([self._image_from_path(image_path)]))
+        try:
+            image_path = await self.renderer.render_card(result)
+            if image_path is None:
+                report.preparation_failed_count += 1
+                return report
+            segs = [self._image_from_path(image_path)]
+        except Exception as exc:
+            report.preparation_failed_count += 1
+            self._log_failure("preview_prepare", exc)
+            return report
+        try:
+            await event.send(event.chain_result(segs))
+        except Exception as exc:
+            report.failed_count += 1
+            self._log_failure("preview_send", exc, segs)
+        else:
+            report.sent_count += 1
+            report.preview_sent_count += 1
+        return report
 
     async def _build_segments(
         self,
         result: ParseResult,
         plan: dict,
+        report: DeliveryReport | None = None,
     ) -> list[BaseMessageComponent]:
         """
         根据发送计划构建消息段列表
@@ -164,11 +221,20 @@ class MessageSender:
         - 转换为 AstrBot 消息组件
         """
         segs: list[BaseMessageComponent] = []
+        if report is None:
+            report = DeliveryReport()
 
         # 合并转发时，卡片以内联形式作为一个消息段参与合并
         if plan["render_card"] and plan["force_merge"]:
-            if image_path := await self.renderer.render_card(result):
-                segs.append(self._image_from_path(image_path))
+            try:
+                image_path = await self.renderer.render_card(result)
+                if image_path is not None:
+                    segs.append(self._image_from_path(image_path))
+                else:
+                    report.preparation_failed_count += 1
+            except Exception as exc:
+                report.preparation_failed_count += 1
+                self._log_failure("inline_card_prepare", exc)
 
         # 轻媒体处理
         for cont in plan["light"]:
@@ -179,9 +245,14 @@ class MessageSender:
 
             try:
                 path: Path = await cont.get_path()
-            except (DownloadLimitException, ZeroSizeException):
+            except DownloadLimitException:
+                report.skipped_count += 1
+                continue
+            except ZeroSizeException:
+                report.download_failed_count += 1
                 continue
             except DownloadException:
+                report.download_failed_count += 1
                 if self.cfg.show_download_fail_tip:
                     segs.append(Plain("此项媒体下载失败"))
                 continue
@@ -202,6 +273,7 @@ class MessageSender:
             try:
                 path: Path = await cont.get_path()
             except (SizeLimitException, DurationLimitException) as exc:
+                report.skipped_count += 1
                 if self.cfg.show_download_fail_tip:
                     message = (
                         "此项媒体超过时长限制"
@@ -210,7 +282,11 @@ class MessageSender:
                     )
                     segs.append(Plain(message))
                 continue
-            except DownloadException:
+            except DownloadException as exc:
+                if isinstance(exc, DownloadLimitException):
+                    report.skipped_count += 1
+                else:
+                    report.download_failed_count += 1
                 if self.cfg.show_download_fail_tip:
                     segs.append(Plain("此项媒体下载失败"))
                 continue
@@ -277,51 +353,52 @@ class MessageSender:
         event: AstrMessageEvent,
         result: ParseResult,
         group: SendGroup,
-    ) -> bool:
-        plan = self._build_send_plan(
-            result,
-            group.contents,
-            force_merge_override=group.force_merge,
-            render_card_override=group.render_card,
-        )
-
-        await self._send_preview_card(event, result, plan)
-
-        segs = await self._build_segments(result, plan)
-        segs = self._merge_segments_if_needed(event, segs, plan["force_merge"])
+    ) -> DeliveryReport:
+        report = DeliveryReport()
+        try:
+            plan = self._build_send_plan(
+                result,
+                group.contents,
+                force_merge_override=group.force_merge,
+                render_card_override=group.render_card,
+            )
+            report.include(await self._send_preview_card(event, result, plan))
+            segs = await self._build_segments(result, plan, report)
+            segs = self._merge_segments_if_needed(event, segs, plan["force_merge"])
+        except Exception as exc:
+            report.preparation_failed_count += 1
+            self._log_failure("group_prepare", exc)
+            return report
 
         if not segs:
-            return False
+            return report
 
         try:
             await event.send(event.chain_result(segs))
-            return True
-        except Exception as e:
-            seg_meta = self._collect_seg_meta(segs)
-            logger.error(f"发送解析结果失败： error={e}, segments={seg_meta}")
-            return False
+        except Exception as exc:
+            report.failed_count += 1
+            self._log_failure("group_send", exc, segs)
+        else:
+            report.sent_count += 1
+        return report
+
+    @classmethod
+    def _log_failure(cls, phase: str, exc: Exception, segs=()) -> None:
+        logger.error(
+            f"发送解析结果失败: phase={phase}, error={type(exc).__name__}, "
+            f"segments={cls._collect_seg_meta(segs)}"
+        )
 
     @staticmethod
     def _collect_seg_meta(segs: list[BaseMessageComponent]) -> list[dict[str, str]]:
-        """提取消息段元信息，用于失败日志定位。"""
-        meta: list[dict[str, str]] = []
-
-        for seg in segs:
-            item = {"type": seg.__class__.__name__}
-            for attr in ("file", "path", "url"):
-                value = getattr(seg, attr, None)
-                if value:
-                    item["media"] = str(value)
-                    break
-            meta.append(item)
-
-        return meta
+        """Log component types only, never media paths, URLs or message bodies."""
+        return [{"type": type(seg).__name__} for seg in segs]
 
     async def send_parse_result(
         self,
         event: AstrMessageEvent,
         result: ParseResult,
-    ):
+    ) -> DeliveryReport:
         """
         发送解析结果的统一入口
 
@@ -334,19 +411,23 @@ class MessageSender:
         """
         groups = self._resolve_groups(result)
 
-        sent = False
+        report = DeliveryReport()
         for group in groups:
-            sent = await self._send_group(event, result, group) or sent
+            report.include(await self._send_group(event, result, group))
 
-        if not sent:
+        # Preserve the existing single text fallback when no content group was
+        # delivered. A preview card does not replace the content or this fallback.
+        if report.sent_count == report.preview_sent_count:
             segs = self._build_text_fallback(result)
             if not segs:
                 logger.warning("发送结果为空，不执行发送")
-                return
+                return report
 
             try:
                 await event.send(event.chain_result(segs))
-            except Exception as e:
-                seg_meta = self._collect_seg_meta(segs)
-                logger.error(f"发送解析结果失败： error={e}, segments={seg_meta}")
-            return
+            except Exception as exc:
+                report.failed_count += 1
+                self._log_failure("fallback_send", exc, segs)
+            else:
+                report.sent_count += 1
+        return report

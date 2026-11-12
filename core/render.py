@@ -430,10 +430,8 @@ class Renderer:
             async with aiofiles.open(cache, "wb") as fp:
                 await fp.write(buf.getvalue())
             return cache
-        except Exception:
-            logger.error(
-                f"Failed to render card for result={result}",
-            )
+        except Exception as exc:
+            logger.error(f"Failed to render card ({type(exc).__name__})")
             return None
 
     @suppress_exception

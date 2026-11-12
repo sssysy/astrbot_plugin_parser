@@ -267,7 +267,7 @@ class ParserPlugin(Star):
     async def parse_and_send(self, event: AstrMessageEvent, url: str) -> bool:
         """供其他插件调用的公开方法：解析指定 URL 并直接发送至 event 对应会话"""
         result = await self.parse_url(url)
-        return await self.sender.send_parse_result(event, result)
+        return bool(await self.sender.send_parse_result(event, result))
 
     @filter.llm_tool(name="parse_media_url")
     async def llm_parse_media_url(self, event: AstrMessageEvent, url: str) -> str:
